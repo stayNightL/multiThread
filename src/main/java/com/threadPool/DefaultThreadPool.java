@@ -86,12 +86,23 @@ public class DefaultThreadPool<Job extends Runnable>  implements ThreadPoolImp<J
 
     @Override
     public void addWorkers(int num) {
-
+        synchronized(jobs){
+            num = MAX_WORKER_NUMBERS-workerNum>num?num:MAX_WORKER_NUMBERS-workerNum;
+            initWorkers(num);
+            this.workerNum += num;
+        }
     }
 
     @Override
     public void removeWorkers(int num) {
-
+        synchronized(jobs){
+            num = num>workerNum?workerNum:num;
+            for (int i = 0; i < num; i++) {
+                Worker w =  workers.remove(i);
+                w.shutDown();
+            }
+            this.workerNum -= num;
+        }
     }
 
     @Override

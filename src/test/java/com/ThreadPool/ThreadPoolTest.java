@@ -17,7 +17,7 @@ public class ThreadPoolTest {
             //在这个地方hold，防止测试线程结束
             System.in.read();
         } catch (IOException e) {
-            // TODO Auto-generated catch block
+
             e.printStackTrace();
         }
     }
