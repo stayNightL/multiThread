@@ -1,4 +1,4 @@
-package com.threadPool;
+package com.ThreadPool;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -6,8 +6,8 @@ import java.util.Collections;
 import java.util.LinkedList;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class DefaultThreadPool<Job extends Runnable> implements ThreadPool<Job> {
-    // 线程池最大限制
+public class DefaultThreadPool<Job extends Runnable>  implements ThreadPoolImp<Job>
+{   // 线程池最大限制
     private static final int MAX_WORKER_NUMBERS = 10;
     private static final int DEFAULT_WORKER_NUMBERS = 5;
     private static final int MIN_WORKER_NUMBERS = 1;
@@ -25,12 +25,7 @@ public class DefaultThreadPool<Job extends Runnable> implements ThreadPool<Job> 
         initWorkers(workerNum);
     }
 
-    public static void main(String[] args) {
-        int max = 100;
-        for (int i = 0; i < max; i++) {
-            new DefaultThreadPool<>().execute(new PoolTest(i));
-        }
-    }
+
 
     public void initWorkers(int num) {
         for (int i = 0; i < num; i++) {
@@ -104,25 +99,4 @@ public class DefaultThreadPool<Job extends Runnable> implements ThreadPool<Job> 
         return jobs.size();
     }
 
-}
-
-class PoolTest implements Runnable {
-    PoolTest(int i) {
-        this.i = i;
-    }
-
-    private int i;
-
-    @Override
-    public void run() {
-        System.out.println(Thread.currentThread().getName() + "当前执行的任务：" + i);
-        try {
-            int mi = Math.round(300);
-            System.out.println( "当前执行的任务：" + i+"延迟"+mi);
-            Thread.sleep(mi);
-        } catch (InterruptedException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
-        }
-}
 }

@@ -1,5 +1,5 @@
-package com.threadPool;
-public interface ThreadPool<Job extends Runnable>{
+package com.ThreadPool;
+public interface ThreadPoolImp<Job extends Runnable>{
     void execute(Job job);
     void shutDown();
     void addWorkers(int num);
