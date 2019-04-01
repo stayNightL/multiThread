@@ -1,6 +1,6 @@
-## AbstractQueuedSynchronizer 同步器源码分析--排它锁篇
+## AbstractQueuedSynchronizer 同步器源码分析
 
-
+## 排它锁
 ### 入口方法--```acquire```
 
 ```java
@@ -148,3 +148,133 @@ private void unparkSuccessor(Node node) {
 
 如果从head开始遍历，只能遍历到2，而新加入队列的node在5之后，导致大量线程阻塞。
 而从tail开始，虽然也只能遍历到4，但是可以释放后加入的线程。
+
+
+```java
+public final void acquireShared(int arg) {
+        if (tryAcquireShared(arg) < 0)
+            doAcquireShared(arg);
+    }
+```
+
+## 共享锁篇
+### 入口方法 `acquireShared`
+```java
+public final void acquireShared(int arg) {
+        if (tryAcquireShared(arg) < 0)
+            doAcquireShared(arg);
+    }
+``` 
+`tryAcquireShared` 是 用户自定义的hook 方法，当返回值大于0时，当前线程获得执行权限，当同时多个共享线程启动时，时间上 后启动的线程不会加入队列&阻塞，而是并发执行，以读写为例，多个读线程并不会阻塞，当写线程获取到执行权限的时候才会将之后的读或者写操作阻塞住。下面假设下面线程的执行顺序来讨论执行逻辑：
+> [r1]->[r2]->[w1]->[w2]->[r3]->[r4]
+首先读是可共享操作，所以r1和r2执行时是并发执行的，此时w1来尝试获取执行权限，进入到`doAcquireShared`方法。
+```java
+ private void doAcquireShared(int arg) {
+        final Node node = addWaiter(Node.SHARED);
+        boolean failed = true;
+        try {
+            boolean interrupted = false;
+            for (;;) {
+                final Node p = node.predecessor();
+                if (p == head) {
+                    int r = tryAcquireShared(arg);
+                    if (r >= 0) {
+                        setHeadAndPropagate(node, r);
+                        p.next = null; // help GC
+                        if (interrupted)
+                            selfInterrupt();
+                        failed = false;
+                        return;
+                    }
+                }
+                if (shouldParkAfterFailedAcquire(p, node) &&
+                    parkAndCheckInterrupt())
+                    interrupted = true;
+            }
+        } finally {
+            if (failed)
+                cancelAcquire(node);
+        }
+    }
+```
+`doAcquireShared` 第一步就构造了node加入到队列当中，随后是一个循环过程--不断尝试获取执行权，如果失败就被park，里面有两个判断条件 p==head 和 r >=0,在本例子中，此时（假设）r1、2正在执行，所以r必然小于0（逻辑上），从而进入park状态。w2因为相同的原因呢进入park状态。
+
+此时，r1结束之后，会调用`releaseShared` 方法，代码如下：
+```java
+public final boolean releaseShared(int arg) {
+        if (tryReleaseShared(arg)) {
+            doReleaseShared();
+            return true;
+        }
+        return false;
+    }
+```
+重点是`doReleaseShared`
+```java
+private void doReleaseShared() {
+
+        for (;;) {
+            Node h = head;
+            if (h != null && h != tail) {
+                int ws = h.waitStatus;
+                if (ws == Node.SIGNAL) {
+                    if (!compareAndSetWaitStatus(h, Node.SIGNAL, 0))
+                        continue;            // loop to recheck cases
+                    unparkSuccessor(h);
+                }
+                else if (ws == 0 &&
+                         !compareAndSetWaitStatus(h, 0, Node.PROPAGATE))
+                    continue;                // loop on failed CAS
+            }
+            if (h == head)                   // loop if head changed
+                break;
+        }
+    }
+```
+该方法主要是unpark队列中的下一个节点的线程，此时队列头是w1，将其unpark之后，w1 会再循环一次从而获取到执行权限，w2继续unpark，r3，r4也会进入unpark状态。下面是获取执行权限的代码：
+```java
+ if (p == head) {
+                    int r = tryAcquireShared(arg);
+                    if (r >= 0) {
+                        setHeadAndPropagate(node, r);
+                        p.next = null; // help GC
+                        if (interrupted)
+                            selfInterrupt();
+                        failed = false;
+                        return;
+                    }
+                }
+```
+此时，w1 同时满足 p==head 和 r>=0 两个条件，获取到执行权限。
+当w1执行完，相同的逻辑会执行w2，当执行完w2 将要唤醒r3的时候，会有一个线程的判断：如果是共享类型的线程，则触发一次`doReleaseShared`，代码如下：
+``` java
+ private void setHeadAndPropagate(Node node, int propagate) {
+        Node h = head; // Record old head for check below
+        setHead(node);
+        /*
+         * Try to signal next queued node if:
+         *   Propagation was indicated by caller,
+         *     or was recorded (as h.waitStatus either before
+         *     or after setHead) by a previous operation
+         *     (note: this uses sign-check of waitStatus because
+         *      PROPAGATE status may transition to SIGNAL.)
+         * and
+         *   The next node is waiting in shared mode,
+         *     or we don't know, because it appears null
+         *
+         * The conservatism in both of these checks may cause
+         * unnecessary wake-ups, but only when there are multiple
+         * racing acquires/releases, so most need signals now or soon
+         * anyway.
+         */
+        if (propagate > 0 || h == null || h.waitStatus < 0 ||
+            (h = head) == null || h.waitStatus < 0) {
+            Node s = node.next;
+            if (s == null || s.isShared())
+                doReleaseShared();
+        }
+    }
+```
+当触发```doReleaseShared()```的时候，根据上面的分析，会unpark下一个节点，从而unpark r4 ,如果以后均是共享型的线程，也会依次unpark.
+
+> 排它锁和共享锁的大致逻辑是一致的，只不过对阻塞线程的唤起策略不同：排它锁只唤醒下一个节点，共享锁则唤起下N个连续的共享节点或者一个排他节点--在代码上的体现就是在设置当前头节点的过程中，共享节点多做一次唤醒操作（当然是有条件的）。
