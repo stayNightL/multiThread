@@ -278,3 +278,134 @@ private void doReleaseShared() {
 当触发```doReleaseShared()```的时候，根据上面的分析，会unpark下一个节点，从而unpark r4 ,如果以后均是共享型的线程，也会依次unpark.
 
 > 排它锁和共享锁的大致逻辑是一致的，只不过对阻塞线程的唤起策略不同：排它锁只唤醒下一个节点，共享锁则唤起下N个连续的共享节点或者一个排他节点--在代码上的体现就是在设置当前头节点的过程中，共享节点多做一次唤醒操作（当然是有条件的）。
+
+## 重入锁--ReentrantLock
+> 重入锁：假设A线程执行某块代码c，持有锁b，因为某种原因（递归）需要重新进入到c中，不需要再次竞争锁b，直接可以进入，这种锁机制称为重入锁，在非重入锁的情况下遇到上述场景，会导致自身死锁（A一直等A释放锁）。
+`ReentrantLock`是JDK自身提供的重入锁实现，核心代码如下：
+```java
+ final boolean nonfairTryAcquire(int acquires) {
+            final Thread current = Thread.currentThread();
+            int c = getState();
+            if (c == 0) {
+                if (compareAndSetState(0, acquires)) {
+                    setExclusiveOwnerThread(current);
+                    return true;
+                }
+            }
+            else if (current == getExclusiveOwnerThread()) {
+                int nextc = c + acquires;
+                if (nextc < 0) // overflow
+                    throw new Error("Maximum lock count exceeded");
+                setState(nextc);
+                return true;
+            }
+            return false;
+        }
+```
+这是`ReentrantLock`非公平锁的实现，对于重入锁机制，体现在：
+```java
+else if (current == getExclusiveOwnerThread()) {
+                int nextc = c + acquires;
+                if (nextc < 0) // overflow
+                    throw new Error("Maximum lock count exceeded");
+                setState(nextc);
+                return true;
+            }
+```
+这一段中，在这个判断里面判断了当前线程是不是当前获得执行权的线程，如果是，更新状态，继续执行。
+对于公平锁，代码实现十分相似，只是加了一个判断：
+```java
+ protected final boolean tryAcquire(int acquires) {
+            final Thread current = Thread.currentThread();
+            int c = getState();
+            if (c == 0) {
+                if (!hasQueuedPredecessors() &&
+                    compareAndSetState(0, acquires)) {
+                    setExclusiveOwnerThread(current);
+                    return true;
+                }
+            }
+            else if (current == getExclusiveOwnerThread()) {
+                int nextc = c + acquires;
+                if (nextc < 0)
+                    throw new Error("Maximum lock count exceeded");
+                setState(nextc);
+                return true;
+            }
+            return false;
+        }
+```
+多了一个条件`!hasQueuedPredecessors()`,这个条件可以简单的理解为是判断当前等待队列是否有等待节点（实际判断依赖了同步器的实现），如果有，返回false 从而使当前线程加入到队列尾。
+另外补充一下公平锁和非公平锁：
+> 公平锁 是指 先到先得，因为同一个时刻竞争锁的不止有队列里的下一个节点，还有此刻新启动的线程，以及当前线程（比如代码loop），所以必须确保队列里的节点优先。
+
+> 非公平锁 是指 谁得是谁，无论是哪个线程，先成功设置状态的线程获取执行权。
+*二者没有谁更好，只有谁更合适。公平锁执行分布更均匀，但是上下文切换比较频繁。非公平锁会导致某些线程一直得不到执行权的问题，但是上下文切换较少，tps更高*
+## 读写锁--ReentrantReadWriteLock
+读写锁是共享读，非完全排它写，写时可（重入）读的一种锁，在此提到他是为了引入下一个概念--锁降级。
+
+先假设这样一个情况：N个线程对同一数据进行循环读，当读到的数据满足一定条件C，则会对数据进行写操作P1并根据修改完的内容做一些其他操作P2
+
+首先，在读锁未释放的时候不能开写锁，所以很直觉的一种处理方法是：读锁->解读锁->写锁->P1->解写锁->P2
+
+但是注意解写锁这个操作，这个操作之后很可能是另一个写操作执行，这就导致P2处理的数据 实际上是过期的（数据可见性问题）
+
+锁降级 就是为了处理这种情况，把一个写锁降级成为读锁，执行过程如下： 读锁->解读锁->写锁->P1->读锁->解写锁->P2->解读锁。
+
+这样在解写锁之后，不可能是一个写操作，一定会是读操作，一直到最后解读锁才有可能让新的写操作插入进来，从而避免了数据不一致的问题。
+
+另外： 为什么P2要在解写锁之后？ 因为P2可能是一个耗时的操作，放在写锁里会导致大量读写被阻塞，而放在读锁里，只会阻塞写锁（也必须阻塞写锁）
+
+## 通知唤醒机制--Condition
+Condition只需要关心`await`和`signal`两个方法即可：
+### await
+``` java
+public final void await() throws InterruptedException {
+            if (Thread.interrupted())
+                throw new InterruptedException();
+            Node node = addConditionWaiter();
+            int savedState = fullyRelease(node);
+            int interruptMode = 0;
+            while (!isOnSyncQueue(node)) {
+                LockSupport.park(this);
+                if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+                    break;
+            }
+            if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
+                interruptMode = REINTERRUPT;
+            if (node.nextWaiter != null) // clean up if cancelled
+                unlinkCancelledWaiters();
+            if (interruptMode != 0)
+                reportInterruptAfterWait(interruptMode);
+        }
+```
+主要代码做了以下几件事：
+1. 构造一个新的Condition类型的节点加入到condition的等待队列中
+2. 释放锁
+3. 检查当前节点是否在同步队列中，如果不在，说明当前仍在等待队列，将当前线程park，如果在，说明被唤醒，（因为唤醒会将节点加入到同步队列）
+4. acquireQueued使当前线程重新竞争执行权
+### signal
+```java
+final boolean transferForSignal(Node node) {
+        /*
+         * If cannot change waitStatus, the node has been cancelled.
+         */
+        if (!node.compareAndSetWaitStatus(Node.CONDITION, 0))
+            return false;
+
+        /*
+         * Splice onto queue and try to set waitStatus of predecessor to
+         * indicate that thread is (probably) waiting. If cancelled or
+         * attempt to set waitStatus fails, wake up to resync (in which
+         * case the waitStatus can be transiently and harmlessly wrong).
+         */
+        Node p = enq(node);
+        int ws = p.waitStatus;
+        if (ws > 0 || !p.compareAndSetWaitStatus(ws, Node.SIGNAL))
+            LockSupport.unpark(node.thread);
+        return true;
+    }
+```
+这是signal关键逻辑的代码，首先尝试将node的状态改为0（node的初始状态为0），成功后将节点加入的同步队列（`enq`),并将状态设置为SIGNAL，如果设置失败，就将当前线程unpark，此时线程会回到`acquireQueued`方法重新尝试获取执行权，获取不到就将自己重新park。
+
+> 通过对Condition的了解，对同步器的整体有一个更完整的把握：同步器包含一个同步队列和N个等待队列，每个等待队列对应一个condition，所谓等待机制就是将当前Node（可能没有或不是）移动到对应的condition队列中，唤醒就是将condition的队列移动一个或者全部到等待队列中。
